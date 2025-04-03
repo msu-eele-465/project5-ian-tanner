@@ -15,6 +15,7 @@
 volatile int window_size = 3;
 volatile unsigned int adc_results[window_size];
 volatile int sample_index = 0;
+volatile int samples_collected = 0;
 
 void start_ADC_conversion()
 {
@@ -441,9 +442,15 @@ __interrupt void ADC_ISR(void) {
     if (sample_index >= window_size)
     {
 
-        unsigned int temperature = get_temperature();
+        samples_collected = 1;
         sample_index = 0;
 
     }
 
+    if (samples_collected == 1)
+    {
+
+        unsigned int temperature = get_temperature();
+
+    }
 }
