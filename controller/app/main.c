@@ -8,7 +8,7 @@
 
 #define LCD_ADDRESS 0x01   // Address of the LCD MSP430FR2310
 #define LED_ADDRESS 0X02   // Address of LED Bar MSP
-#define TX_BYTES 3         // Number of bytes to transmit
+#define TX_BYTES 5         // Number of bytes to transmit
 #define REF_VOLTAGE 3.3    // ADC reference
 
 // ADC Data
@@ -16,6 +16,8 @@ volatile int window_size = 3;
 volatile unsigned int adc_results[window_size];
 volatile int sample_index = 0;
 volatile int samples_collected = 0;
+volatile int temperature_integer = 0;
+volatile int temperature_decimal = 0;
 
 void start_ADC_conversion()
 {
@@ -24,7 +26,7 @@ void start_ADC_conversion()
 
 }
 
-float get_temperature()
+void get_temperature()
 {
 
     unsigned int total_adc_value = 0;
@@ -38,16 +40,18 @@ float get_temperature()
     unsigned int average_adc_value = total_adc_value / window_size;
     float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
     float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
-    return temperature * 10.0;
+    temperature_integer = (int)temperature;
+    temperature *= 10.0;
+    temperature_decimal = (int)(temperature - integer_part);
 
 }
 
 
 // I2C Data
 volatile int tx_index = 0;
-char tx_buffer[TX_BYTES] = {8, 3, 0}; // Default locked buffer
+char tx_buffer[TX_BYTES] = {0, 0, temperature_integer, temperature_decimal, window_size}; // Default locked buffer
 
-char led_buffer[11] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11};
+char led_buffer[9] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
 
 volatile int led_index = 0;
 
@@ -90,7 +94,7 @@ char input_code[] = "0000";
 int mili_seconds_surpassed = 0;
 
 int index = 0;  // Which index of the above input_code array we're in
-int state = 0;  // State 0: Locked, State 1: Unlocking, State 2: Unlocked
+int state = 0;  // State 0: Locked, State 1: Unlocking, State 2: Unlocked, State 3: Window Size Input, State 4: Pattern Input
 int period = 0;
 
 unsigned int transition = 32768;
@@ -314,61 +318,145 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                 switch(key_pressed){
                     case('D'):
                         state = 0; // Enter locked mode
-                        tx_buffer[0] = 8;
-                        tx_buffer[2] = 0;
-                        transition = 82768;
+                        tx_buffer[0] = 0;
+                        tx_buffer[1] = 0;
+                        transition = 32768;
                         led_index = 0;
                         break;
                     case('A'):
-                        transition -= 8192; // Decrease transition by 8192
-                        tx_buffer[1]--;
-                        led_index = 1;
+                        state = 3;
+                        tx_buffer[0] = 2;
                         break;
                     case('B'):
-                        transition += 8192; // Increase 8192
-                        tx_buffer[1]++;
-                        led_index = 2;
-                        break;
-                    case('0'):      // Pattern 0
-                        state = 3;
-                        tx_buffer[0] = 0;
-                        led_index = 3;
-                        break;
-                    case('1'):      // Pattern 1
                         state = 4;
                         tx_buffer[0] = 1;
-                        led_index = 4;
+                        break;
+                    case('0'):      // Pattern 0
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 0;
+                            led_index = 1;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 3;
+                            state = 2;
+                        }
+                        break;
+                    case('1'):      // Pattern 1
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 1;
+                            led_index = 2;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 1;
+                            state = 2;
+                        }
                         break;
                     case('2'):      // Pattern 2
-                        state = 5;
-                        tx_buffer[0] = 2;
-                        led_index = 5;
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 2;
+                            led_index = ;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 2;
+                            state = 2;
+                                                }
                         break;
                     case('3'):      // Pattern 3
-                        state = 6;
-                        tx_buffer[0] = 3;
-                        led_index = 6;
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 3;
+                            led_index = 4;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 3;
+                            state = 2;
+                        }
                         break;
                     case('4'):      // Pattern 4
-                        state = 7;
-                        tx_buffer[0] = 4;
-                        led_index = 7;
+                        if (state == 4){
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 4;
+                            led_index = 5;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 4;
+                            state = 2;
+                        }
                         break;
                     case('5'):      // Pattern 5
-                        state = 8;
-                        tx_buffer[0] = 5;
-                        led_index = 8;
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 5;
+                            led_index = 6;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 5;
+                            state = 2;
+                        }
                         break;
                     case('6'):      // Pattern 6
-                        state = 9;
-                        tx_buffer[0] = 6;
-                        led_index = 9;
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 6;
+                            led_index = 7;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 6;
+                            state = 2;
+                        }
                         break;
                     case('7'):      // Pattern 7
-                        state = 10;
-                        tx_buffer[0] = 7;
-                        led_index = 10;
+                        if (state == 4)
+                        {
+                            tx_buffer[0] = 3;
+                            tx_buffer[1] = 4;
+                            led_index = 8;
+                            state = 2;
+                        }
+                        else if (state == 3)
+                        {
+                            window_size = 7;
+                            state = 2;
+                        }
                         break;
+                    case('8'):
+                        if (state == 3)
+                        {
+                            window_size = 8;
+                            state = 2;
+                            tx_buffer[0] = 3;
+                        }
+                        break;
+                    case('9'):
+                        if (state == 3)
+                        {
+                            window_size = 9;
+                            state = 2;
+                            tx_buffer[0] = 3;
+                        }
                     default:
                         break;
                 }
@@ -403,8 +491,10 @@ __interrupt void ISR_TB1_Heartbeat(void)
 #pragma vector = TIMER2_B0_VECTOR
 __interrupt void ISR_TB2_CCR0(void)
 {
-
-    start_ADC_conversion();
+    if (state == 2)
+    {
+        start_ADC_conversion();
+    }
 
 }
 
@@ -450,7 +540,7 @@ __interrupt void ADC_ISR(void) {
     if (samples_collected == 1)
     {
 
-        unsigned int temperature = get_temperature();
+        get_temperature();
 
     }
 }
