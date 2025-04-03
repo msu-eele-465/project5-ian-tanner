@@ -12,44 +12,16 @@
 #define REF_VOLTAGE 3.3    // ADC reference
 
 // ADC Data
-volatile int window_size = 3;
-volatile unsigned int adc_results[window_size];
-volatile int sample_index = 0;
-volatile int samples_collected = 0;
-volatile int temperature_integer = 0;
-volatile int temperature_decimal = 0;
-
-void start_ADC_conversion()
-{
-
-    ADCCTL0 |= ADCENC | ADCSC;
-
-}
-
-void get_temperature()
-{
-
-    unsigned int total_adc_value = 0;
-    for (int i = 0; i < window_size; i++)
-    {
-
-        total_adc_value += adc_results[i];
-
-    }
-
-    unsigned int average_adc_value = total_adc_value / window_size;
-    float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
-    float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
-    temperature_integer = (int)temperature;
-    temperature *= 10.0;
-    temperature_decimal = (int)(temperature - integer_part);
-
-}
-
+int window_size = 3;
+int adc_results[10];
+int sample_index = 0;
+int samples_collected = 0;
+int temperature_integer = 0;
+int temperature_decimal = 0;
 
 // I2C Data
 volatile int tx_index = 0;
-char tx_buffer[TX_BYTES] = {0, 0, temperature_integer, temperature_decimal, window_size}; // Default locked buffer
+char tx_buffer[TX_BYTES] = {0, 0, 0, 0, 0}; // Default locked buffer
 
 char led_buffer[9] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
 
@@ -70,6 +42,35 @@ void send_led_i2c()
     UCB1CTLW0 |= UCTR | UCTXSTT;  // Start condition, put master in transmit mode
     UCB1IE |= UCTXIE1; // Enable TX interrupt
 
+}
+
+void start_ADC_conversion()
+{
+
+    ADCCTL0 |= ADCENC | ADCSC;
+
+}
+
+void get_temperature()
+{
+
+    int i;
+    unsigned int total_adc_value = 0;
+    for (i = 1; i <= window_size; i++)
+    {
+
+        total_adc_value += adc_results[i];
+
+    }
+
+    unsigned int average_adc_value = total_adc_value / window_size;
+    float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
+    float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
+    temperature_integer = (int)temperature;
+    temperature *= 10.0;
+    temperature_decimal = (int)(temperature - temperature_integer);
+    tx_buffer[2] = temperature_integer;
+    tx_buffer[3] = temperature_decimal;
 }
 
 // Keypad data
@@ -109,13 +110,13 @@ int main(void)
     P1SEL1 |= BIT0;
 
     ADCCTL0 &= ~ADCSHT;
-    ADCCTL0 |= ADCSSHT_2;
+    ADCCTL0 |= ADCSHT_2;
     ADCCTL0 |= ADCON;
     ADCCTL1 |= ADCSSEL_2;
     ADCCTL1 |= ADCSHP;
     ADCCTL2 &= ~ADCRES;
     ADCCTL2 |= ADCRES_2;
-    ADCMTL0 |= ADCINCH_0;
+    ADCMCTL0 |= ADCINCH_0;
     ADCIE |= ADCIE0;
     //---------------- End Configure ADC ------------
 
@@ -343,6 +344,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 3;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('1'):      // Pattern 1
@@ -357,6 +359,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 1;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('2'):      // Pattern 2
@@ -364,13 +367,14 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             tx_buffer[0] = 3;
                             tx_buffer[1] = 2;
-                            led_index = ;
+                            led_index = 3;
                             state = 2;
                         }
                         else if (state == 3)
                         {
                             window_size = 2;
                             state = 2;
+                            tx_buffer[4] = window_size;
                                                 }
                         break;
                     case('3'):      // Pattern 3
@@ -385,6 +389,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 3;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('4'):      // Pattern 4
@@ -398,6 +403,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 4;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('5'):      // Pattern 5
@@ -412,6 +418,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 5;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('6'):      // Pattern 6
@@ -426,6 +433,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 6;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('7'):      // Pattern 7
@@ -440,6 +448,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 7;
                             state = 2;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('8'):
@@ -448,6 +457,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                             window_size = 8;
                             state = 2;
                             tx_buffer[0] = 3;
+                            tx_buffer[4] = window_size;
                         }
                         break;
                     case('9'):
@@ -456,6 +466,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                             window_size = 9;
                             state = 2;
                             tx_buffer[0] = 3;
+                            tx_buffer[4] = window_size;
                         }
                     default:
                         break;
