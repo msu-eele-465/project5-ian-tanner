@@ -7,7 +7,7 @@
  */
 
 #define LCD_ADDRESS 0x01   // Address of the LCD MSP430FR2310
-#define LED_ADDRESS 0X02   // Address of LED Bar MSP
+#define LED_ADDRESS 0X01   // Address of LED Bar MSP
 #define TX_BYTES 5         // Number of bytes to transmit
 #define REF_VOLTAGE 3.3    // ADC reference
 
@@ -21,7 +21,7 @@ int temperature_decimal = 0;
 
 // I2C Data
 volatile int tx_index = 0;
-char tx_buffer[TX_BYTES] = {0, 0, 0, 0, 0}; // Default locked buffer
+char tx_buffer[TX_BYTES] = {0, 8, 0, 0, 3};
 
 char led_buffer[9] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
 
@@ -51,28 +51,6 @@ void start_ADC_conversion()
 
 }
 
-void get_temperature()
-{
-
-    int i;
-    unsigned int total_adc_value = 0;
-    for (i = 1; i <= window_size; i++)
-    {
-
-        total_adc_value += adc_results[i];
-
-    }
-
-    unsigned int average_adc_value = total_adc_value / window_size;
-    float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
-    float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
-    temperature_integer = (int)temperature;
-    temperature *= 10.0;
-    temperature_decimal = (int)(temperature - temperature_integer);
-    tx_buffer[2] = temperature_integer;
-    tx_buffer[3] = temperature_decimal;
-}
-
 // Keypad data
 // 2D Array, each array is a row, each item is a column.
 
@@ -100,14 +78,40 @@ int period = 0;
 
 unsigned int transition = 32768;
 
+void get_temperature()
+{
+
+    int i;
+    unsigned int total_adc_value = 0;
+    for (i = 1; i <= window_size; i++)
+    {
+
+        total_adc_value += adc_results[i];
+
+    }
+
+    unsigned int average_adc_value = total_adc_value / window_size;
+    float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
+    float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
+    temperature_integer = (int)temperature;
+    temperature *= 10.0;
+    temperature_decimal = (int)(temperature - temperature_integer);
+    tx_buffer[2] = temperature_integer;
+    tx_buffer[3] = temperature_decimal;
+
+    if(state==2){
+        send_I2C_data();
+    }
+}
+
 int main(void)
 {
     WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
 
     //---------------- Configure ADC ---------------
     // Set P1.0 as ADC input
-    P1SEL0 |= BIT0;
-    P1SEL1 |= BIT0;
+    P1SEL0 |= BIT1;
+    P1SEL1 |= BIT1;
 
     ADCCTL0 &= ~ADCSHT;
     ADCCTL0 |= ADCSHT_2;
@@ -116,7 +120,7 @@ int main(void)
     ADCCTL1 |= ADCSHP;
     ADCCTL2 &= ~ADCRES;
     ADCCTL2 |= ADCRES_2;
-    ADCMCTL0 |= ADCINCH_0;
+    ADCMCTL0 |= ADCINCH_1;
     ADCIE |= ADCIE0;
     //---------------- End Configure ADC ------------
 
@@ -225,8 +229,6 @@ int main(void)
 
     send_I2C_data();
 
-    send_led_i2c();
-
     __enable_interrupt();       // Enable Global Interrupts
     PM5CTL0 &= ~LOCKLPM5;       // Clear lock bit
 
@@ -250,8 +252,8 @@ __interrupt void ISR_TB0_SwitchColumn(void)
             state = 0; // Set to lock state
             index = 0; // Reset position on input_code
             mili_seconds_surpassed = 0; // Reset timeout counter
-            tx_buffer[0] = 8;
-            tx_buffer[2] = 0;
+            tx_buffer[0] = 0;
+            //tx_buffer[2] = 0;
             send_I2C_data();
         }else{
             mili_seconds_surpassed++;
@@ -289,7 +291,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
         }
 
         key_pressed = keyPad[row][column];
-        tx_buffer[2] = key_pressed;
 
         switch(state){
 
@@ -304,11 +305,12 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     for(i = 0; i < 4; i++){ // Iterate through the pass_code and input_code
                         if(input_code[i] != pass_code[i]){ // If an element in pass_code and input_code doesn't match
                             state = 0;                   // Set state back to locked.
-                            tx_buffer[0] = 8;
-                            tx_buffer[2] = 0;
+                            tx_buffer[0] = 0;
                             break;
                         }
                     }
+                    tx_buffer[0] = 3;
+                    send_I2C_data();
                 }else{
                     index++; // Shift to next index of input code
                 }
@@ -316,6 +318,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                 break;
 
             default:     // If unlocked, we check the individual key press.
+                tx_buffer[0] = 3; // Display Pattern
                 switch(key_pressed){
                     case('D'):
                         state = 0; // Enter locked mode
@@ -326,17 +329,16 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         break;
                     case('A'):
                         state = 3;
-                        tx_buffer[0] = 2;
+                        tx_buffer[0] = 2; // Set Window Size
                         break;
                     case('B'):
                         state = 4;
-                        tx_buffer[0] = 1;
+                        tx_buffer[0] = 1; // Set Pattern
                         break;
                     case('0'):      // Pattern 0
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
-                            tx_buffer[1] = 0;
+                            tx_buffer[1] = 0; // Pattern 0
                             led_index = 1;
                             state = 2;
                         }
@@ -345,12 +347,12 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                             window_size = 3;
                             state = 2;
                             tx_buffer[4] = window_size;
+
                         }
                         break;
                     case('1'):      // Pattern 1
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 1;
                             led_index = 2;
                             state = 2;
@@ -365,7 +367,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     case('2'):      // Pattern 2
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 2;
                             led_index = 3;
                             state = 2;
@@ -380,7 +381,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     case('3'):      // Pattern 3
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 3;
                             led_index = 4;
                             state = 2;
@@ -394,7 +394,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         break;
                     case('4'):      // Pattern 4
                         if (state == 4){
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 4;
                             led_index = 5;
                             state = 2;
@@ -409,7 +408,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     case('5'):      // Pattern 5
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 5;
                             led_index = 6;
                             state = 2;
@@ -424,7 +422,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     case('6'):      // Pattern 6
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 6;
                             led_index = 7;
                             state = 2;
@@ -439,7 +436,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                     case('7'):      // Pattern 7
                         if (state == 4)
                         {
-                            tx_buffer[0] = 3;
                             tx_buffer[1] = 4;
                             led_index = 8;
                             state = 2;
@@ -456,7 +452,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 8;
                             state = 2;
-                            tx_buffer[0] = 3;
                             tx_buffer[4] = window_size;
                         }
                         break;
@@ -465,7 +460,6 @@ __interrupt void ISR_TB0_SwitchColumn(void)
                         {
                             window_size = 9;
                             state = 2;
-                            tx_buffer[0] = 3;
                             tx_buffer[4] = window_size;
                         }
                     default:
@@ -476,7 +470,7 @@ __interrupt void ISR_TB0_SwitchColumn(void)
 
         while(P3IN > 15){} // Wait until button is released
         send_I2C_data();
-    send_led_i2c();
+
     }
 
     if(P3IN < 16){ // Checks if pins 7 - 4 are on, that means a button is being held down; don't shift columns
