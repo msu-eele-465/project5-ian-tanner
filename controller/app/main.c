@@ -1,172 +1,181 @@
-#include <msp430.h>
-#include <stdint.h>
-#include <math.h>
+#include <msp430.h> 
 
-/**
- * main.c
- */
+// Port definitions
+#define PXOUT P1OUT
+#define PXSEL0 P1SEL0
+#define PXSEL1 P1SEL1
+#define PXDIR P1DIR
 
-#define LCD_ADDRESS 0x01   // Address of the LCD MSP430FR2310
-#define LED_ADDRESS 0X02   // Address of LED Bar MSP
-#define TX_BYTES 3         // Number of bytes to transmit
-#define REF_VOLTAGE 3.3    // ADC reference
+// Pin definitions
+#define D4 BIT0
+#define D5 BIT1
+#define D6 BIT4
+#define D7 BIT5
 
-// ADC Data
-volatile int window_size = 3;
-volatile unsigned int adc_results[window_size];
-volatile int sample_index = 0;
-volatile int samples_collected = 0;
+#define E BIT6
+#define RS BIT7
 
-void start_ADC_conversion()
-{
+// I2C definitions
+#define ADDRESS 0x01    // Address for microcontroller
 
-    ADCCTL0 |= ADCENC | ADCSC;
+// LCD Variables
+int pattern_index, state_index = 0;
 
+int temperature_int, temperature_dec, window_size = 0;
+
+typedef enum state_enum {LOCKED, SET_PATTERN, SET_WINDOW, DISPLAY_PATTERN};
+
+typedef enum pattern_enum {STATIC, BREAK, UP_COUNTER, IN_AND_OUT, DOWN_COUNTER, ROTATE_1_LEFT, ROTATE_7_LEFT, FILL_LEFT};
+
+char states_array[3][20] = {"", "Set Pattern", "Set Window Size"};
+
+char patterns_array[9][20] = {
+    "static", "break", "up counter", "in and out", "down counter", "rotate 1 left", "rotate 7 left", "fill left", ""
+};
+
+
+
+void lcd_pulse_enable(){
+    // Pulses the enable pin so LCD knows to take next nibble.
+    PXOUT |= E;         // Enable Enable pin
+    PXOUT &= ~E;        // Disable Enable pin
 }
 
-float get_temperature()
-{
+void lcd_send_nibble(char nibble){
+    // Sends out four bits to the LCD by setting the last four pins (D4 - 7) to the nibble.
 
-    unsigned int total_adc_value = 0;
-    for (int i = 0; i < window_size; i++)
-    {
+    PXOUT &= ~(D4 | D5 | D6 | D7); // Clear the out bits associated with our data lines.
 
-        total_adc_value += adc_results[i];
+    // For each bit of the nibble, set the associated data line to it.
+    if (nibble & BIT0) PXOUT |= D4;
+    if (nibble & BIT1) PXOUT |= D5;
+    if (nibble & BIT2) PXOUT |= D6;
+    if (nibble & BIT3) PXOUT |= D7;
 
+    //PXOUT = (PXOUT &= 0xF0) | (nibble & 0x0F); // First we clear the first four bits, then we set them to the nibble.
+    lcd_pulse_enable();  // Pulse enable so LCD reads our input
+}
+
+void lcd_send_command(char command){
+    // Takes an 8-bit command and sends out the two nibbles sequentially.
+    PXOUT &= ~RS; // CLEAR RS to set to command mode
+    lcd_send_nibble(command >> 4); // Send upper nibble by bit shifting it to lower nibble
+    lcd_send_nibble(command & 0x0F); // Send lower nibble by clearing upper nibble.
+}
+
+void lcd_send_data(char data){
+    // Takes an 8-bit data and sends out the two nibbles sequentially.
+    PXOUT |= RS; // SET RS to set to data mode
+    lcd_send_nibble(data >> 4); // Send upper nibble by bit shifting it to lower nibble
+    lcd_send_nibble(data & 0x0F); // Send lower nibble by clearing upper nibble.
+}
+
+void lcd_print_sentence(char *str){
+    // Takes a string and iterates character by character, sending that character to be written out, until \0 is reached.
+    while(*str){
+        lcd_send_data(*str);
+        str++;
+    }
+}
+
+void lcd_clear(){
+    // Clearing the screen is temperamental and requires a good delay, this is pretty arbitrary with a good safety margin.
+    lcd_send_command(0x01);   // Clear display
+    __delay_cycles(2000);   // Clear display needs some time, I'm aware __delay_cycles generally isn't advised, but it works in this context
+}
+
+void lcdInit(){
+    // Initializes the LCD to 4 bit mode, 2 lines 5x8 font, with enabled display and cursor,
+    // clear the display, then set cursor to proper location.
+
+    PXOUT &= ~RS; // Explicitly set RS to 0 so we are in command mode
+
+    // We need to send the code 3h, 3 times, to properly wake up the LCD screen
+    lcd_send_nibble(0x03);
+    lcd_send_nibble(0x03);
+    lcd_send_nibble(0x03);
+
+    lcd_send_nibble(0x02);    // Code 2h sets it to 4-bit mode after waking up
+
+    lcd_send_command(0x28);   // Code 28h sets it to 2 line, 5x8 font.
+
+    lcd_send_command(0x0C);   // Turns display on, turns cursor off, turns blink off.
+
+    lcd_send_command(0x06);   // Increments cursor on each input
+
+    lcd_clear();             // Clear display
+}
+
+void lcd_write(){
+    /*  Ultimately dictates what will be present on screen after an I2C transmission.
+        I2C should come in five bytes, state_index, pattern_index, temperature_int, temperature_dec, and window_size.
+        state_index -> Integer value corresponding to four states device can be in.
+        State 0 = Locked. 1 = Set Pattern. 2 = Set Window. 3 = Display Pattern
+        pattern_index -> Integer value corresponding to a pattern in patternArray. Pattern 0 is static, so index 0 is static.
+        Pattern 8 is empty, and should be used when there is no pattern being displayed.
+        temperature_int -> Represents integer portion of temperature in Celsius.
+        temperature_dec -> Represents decimal portion of temperature in Celsius
+
+        In the locked state, the display should display nothing.
+
+        In Set Pattern, the display will display the "Set Pattern" Query
+
+        In Set Window, the display will display the "Set Window Size" Query
+
+        In Display Pattern, the display will display the current pattern, which may be empty if none
+        is selected. In this case, use the number 8 for the pattern index, as that corresponds to the empty "".
+        This should be treated as the default unlocked state.
+    */
+    lcd_clear(); // Clear Display
+
+    if (state_index == LOCKED){
+        return;
     }
 
-    unsigned int average_adc_value = total_adc_value / window_size;
-    float voltage = (average_adc_value / 4095.0) * REF_VOLTAGE;
-    float temperature = -1481.96 + sqrt(2.1962e6 + ((1.8639 - voltage) / (3.88e-6)));
-    return temperature * 10.0;
+    lcd_send_command(0x80); // Set cursor to line 1 position 1
 
+    if (state_index == DISPLAY_PATTERN){
+        lcd_print_sentence(patterns_array[pattern_index]);
+    }else{
+        lcd_print_sentence(states_array[state_index]);
+    }
+
+    char temp_string[7]; // Buffer for converting int temp value to string
+    int i = 0;
+
+    temp_string[i++] = (temperature_int / 10) + '0';  // Tens place
+    temp_string[i++] = (temperature_int % 10) + '0';  // Ones place
+    temp_string[i++] = '.';
+    temp_string[i++] = (temperature_dec % 10) + '0';  // First decimal place
+    temp_string[i++] = 0b11011111; // Degrees symbol
+    temp_string[i++] = 'C';
+
+
+
+    lcd_send_command(0xC0); // Set cursor to line 2 position 1
+    lcd_print_sentence("T=");
+    lcd_print_sentence(temp_string);
+
+    lcd_send_command(0xCF); // Set cursor to line 2 position 16
+    lcd_print_sentence("j");
+
+    lcd_send_command(0x80); // Return cursor to line 1 position 1
 }
-
-
-// I2C Data
-volatile int tx_index = 0;
-char tx_buffer[TX_BYTES] = {8, 3, 0}; // Default locked buffer
-
-char led_buffer[11] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11};
-
-volatile int led_index = 0;
-
-void send_I2C_data()
-{
-
-    tx_index = 0; // Reset buffer index
-    UCB0CTLW0 |= UCTR | UCTXSTT;  // Start condition, put master in transmit mode
-    UCB0IE |= UCTXIE0; // Enable TX interrupt
-}
-
-void send_led_i2c()
-{
-
-    led_index = 0;
-    UCB1CTLW0 |= UCTR | UCTXSTT;  // Start condition, put master in transmit mode
-    UCB1IE |= UCTXIE1; // Enable TX interrupt
-
-}
-
-// Keypad data
-// 2D Array, each array is a row, each item is a column.
-
-char keyPad[][4] = {{'1', '2', '3', 'A'},  // Top Row
-                    {'4', '5', '6', 'B'},
-                    {'7', '8', '9', 'C'},
-                    {'*', '0', '#', 'D'}}; // Bottom Row
-/*                    ^              ^
- *                    |              |
- *                    Left Column    Right Column
- */
-
-int column, row = 0;
-
-char key_pressed = '\0';
-
-char pass_code[] = "2659";
-char input_code[] = "0000";
-
-int mili_seconds_surpassed = 0;
-
-int index = 0;  // Which index of the above input_code array we're in
-int state = 0;  // State 0: Locked, State 1: Unlocking, State 2: Unlocked
-int period = 0;
-
-unsigned int transition = 32768;
 
 int main(void)
 {
     WDTCTL = WDTPW | WDTHOLD;   // stop watchdog timer
 
-    //---------------- Configure ADC ---------------
-    // Set P1.0 as ADC input
-    P1SEL0 |= BIT0;
-    P1SEL1 |= BIT0;
+    //---------------- Configure LCD Ports ----------------
 
-    ADCCTL0 &= ~ADCSHT;
-    ADCCTL0 |= ADCSSHT_2;
-    ADCCTL0 |= ADCON;
-    ADCCTL1 |= ADCSSEL_2;
-    ADCCTL1 |= ADCSHP;
-    ADCCTL2 &= ~ADCRES;
-    ADCCTL2 |= ADCRES_2;
-    ADCMTL0 |= ADCINCH_0;
-    ADCIE |= ADCIE0;
-    //---------------- End Configure ADC ------------
+    // Configure Port for digital I/O
+    PXSEL0 &= 0x00;
+    PXSEL1 &= 0x00;
 
-    //---------------- Configure TB0 ----------------
-    TB0CTL |= TBCLR;            // Clear TB0 timer and dividers
-    TB0CTL |= TBSSEL__SMCLK;    // Select SMCLK as clock source
-    TB0CTL |= MC__UP;            // Choose UP counting
+    PXDIR |= 0XFF;  // SET all bits so Port is OUTPUT mode
 
-    TB0CCR0 = 1000;             // TTB0CCR0 = 1000, since 1/MHz * 1000 = 1 ms
-    TB0CCTL0 &= ~CCIFG;         // Clear CCR0 interrupt flag
-    TB0CCTL0 |= CCIE;           // Enable interrupt vector for CCR0
-
-    //---------------- End Configure TB0 ----------------
-
-    //---------------- Configure P3 ----------------
-    // Configure P3 for digital I/O
-    P3SEL0 &= 0x00;
-    P3SEL1 &= 0x00;
-
-    P3DIR &= 0x0F;  // CLEARING bits 7 - 4, that way they are set to INPUT mode
-    P3DIR |= 0X0F;  // SETTING bits 0 - 3, that way they are set to OUTPUT mode
-
-    P3REN |= 0xF0;  // ENABLING the resistors for bits 7 - 4
-    P3OUT &= 0x00;  // CLEARING output register. This both clears our outputs on bits 0 - 3, and sets pull-down resistors
-                    // for bits 7 - 4
-    //---------------- End Configure P3 ----------------
-
-    //---------------- Configure LEDs ----------------
-    //Heartbeat LEDs
-    P1DIR |= BIT0;            //Config P1.0 (LED1) as output
-    P1OUT |= BIT0;            //LED1 = 1 to start
-
-    P6DIR |= BIT6;            //Config P6.6 (LED2) as output
-    P6OUT &= ~BIT6;           //LED2 = 0 to start
-
-    //---------------- End Configure LEDs ----------------
-
-    //---------------- Configure Timers ----------------
-    //LED Timer
-    TB1CTL |= TBCLR;
-    TB1CTL |= TBSSEL__ACLK;
-    TB1CTL |= MC__UP;
-    TB1CCR0 = 32768;
-    TB1CCTL0 |= CCIE;
-    TB1CCTL0 &= ~CCIFG;
-
-    //Temperature Sample Timer
-    TB2CTL |= TBCLR;
-    TB2CTL |= TBSSEL__ACLK;
-    TB2CTL |= MC__UP;
-    TB2CCR0 = 16384;
-
-    TB2CCTL0 |= CCIE;         //enable TB2 CCR0 Overflow IRQ
-    TB2CCTL0 &= ~CCIFG;       //clear CCR0 flag
-    //---------------- End Timer Configure ---------------
+    PXOUT &= 0x00;  // CLEAR all bits in output register
+    //---------------- End Configure Ports ----------------
 
     //---------------- Configure UCB0 I2C ----------------
 
@@ -174,58 +183,21 @@ int main(void)
     P1SEL0 |= BIT2 | BIT3;
     P1SEL1 &= ~(BIT2 | BIT3);
 
-    // Put eUSCI_B0 into reset mode
-    UCB0CTLW0 = UCSWRST;
-
-    // Set as I2C master, synchronous mode, SMCLK source
-    UCB0CTLW0 |= UCMODE_3 | UCMST | UCSYNC | UCSSEL_3;
-
-    // Manually adjusting baud rate to 100 kHz  (1MHz / 10 = 100 kHz)
-    UCB0BRW = 10;
-
-    // Set slave address
-    UCB0I2CSA = LED_ADDRESS;
-
-    // Release reset state
-    UCB0CTLW0 &= ~UCSWRST;
-
-    // Enable transmit interrupt
-    UCB0IE |= UCTXIE0;
+    UCB0CTLW0 = UCSWRST;                 // Put eUSCI in reset
+    UCB0CTLW0 |= UCMODE_3 | UCSYNC;      // I2C mode, synchronous mode
+    UCB0I2COA0 = ADDRESS | UCOAEN;       // Set slave address and enable
+    UCB0CTLW0 &= ~UCSWRST;               // Release eUSCI from reset
+    UCB0IE |= UCRXIE0;                   // Enable receive interrupt
     //---------------- End Configure UCB0 I2C ----------------
 
-    //---------------- Configure UCB1 I2C ----------------
-
-    // Configure P4.6 (SDA) and P4.7 (SCL) for I2C
-    P4SEL0 |= BIT6 | BIT7;
-    P4SEL1 &= ~(BIT6 | BIT7);
-
-    // Put eUSCI_B0 into reset mode
-    UCB1CTLW0 = UCSWRST;
-
-    // Set as I2C master, synchronous mode, SMCLK source
-    UCB1CTLW0 |= UCMODE_3 | UCMST | UCSYNC | UCSSEL_3;
-
-    // Manually adjusting baud rate to 100 kHz  (1MHz / 10 = 100 kHz)
-    UCB1BRW = 10;
-
-    // Set slave address
-    UCB1I2CSA = LCD_ADDRESS;
-
-    // Release reset state
-    UCB1CTLW0 &= ~UCSWRST;
-
-    // Enable transmit interrupt
-    UCB1IE |= UCTXIE1;
-    //---------------- End Configure UCB0 I2C ----------------
-
-    send_I2C_data();
-
-    send_led_i2c();
-
-    __enable_interrupt();       // Enable Global Interrupts
     PM5CTL0 &= ~LOCKLPM5;       // Clear lock bit
+    __bis_SR_register(GIE);     // Enable global interrupts
 
-    while(1) {}
+    lcdInit();
+
+    while(1){
+
+    }
 
     return 0;
 }
@@ -234,223 +206,40 @@ int main(void)
 // Interrupt Service Routines
 //-------------------------------------------------------------------------------
 
-//---------------- START ISR_TB0_SwitchColumn ----------------
-//-- TB0 CCR0 interrupt, read row data from column, shift roll read column right
-#pragma vector = TIMER0_B0_VECTOR
-__interrupt void ISR_TB0_SwitchColumn(void)
-{
-
-    if(state == 1){ // If in unlocking state
-        if(mili_seconds_surpassed >= 5000){
-            state = 0; // Set to lock state
-            index = 0; // Reset position on input_code
-            mili_seconds_surpassed = 0; // Reset timeout counter
-            tx_buffer[0] = 8;
-            tx_buffer[2] = 0;
-            send_I2C_data();
-        }else{
-            mili_seconds_surpassed++;
-        }
-    }
-
-    switch (column) {
-        case 0:
-            P3OUT = 0b00001000; //Enable reading far left column
-            break;
-        case 1:
-            P3OUT = 0b00000100; // Enable reading center left column
-            break;
-        case 2:
-            P3OUT = 0b00000010; // Enable reading center right column
-            break;
-        default: // Case 3
-            P3OUT = 0b00000001; // Enable reading far right column
-    }
-
-    if(P3IN > 15){  // If a button is being pressed
-
-        if(state == 0){ // If we're in the locked state, go to unlocking state.
-            state = 1;
-        }
-
-        if(P3IN & BIT4){    // If bit 4 is receiving input, we're at row 3, so on and so forth
-            row = 3;
-        }else if(P3IN & BIT5){
-            row = 2;
-        }else if(P3IN & BIT6){
-            row = 1;
-        }else if(P3IN & BIT7){
-            row = 0;
-        }
-
-        key_pressed = keyPad[row][column];
-        tx_buffer[2] = key_pressed;
-
-        switch(state){
-
-            case 1: // If unlocking, we populate our input code with each pressed key
-                input_code[index] = key_pressed; // Set the input code at index to what is pressed.
-
-                if(index >= 3){ // If we've entered all four digits of input code:
-                    index = 0;
-                    state = 2; // Initially set state to free
-                    mili_seconds_surpassed = 0; // Stop lockout counter
-                    int i;
-                    for(i = 0; i < 4; i++){ // Iterate through the pass_code and input_code
-                        if(input_code[i] != pass_code[i]){ // If an element in pass_code and input_code doesn't match
-                            state = 0;                   // Set state back to locked.
-                            tx_buffer[0] = 8;
-                            tx_buffer[2] = 0;
-                            break;
-                        }
-                    }
-                }else{
-                    index++; // Shift to next index of input code
-                }
-
-                break;
-
-            default:     // If unlocked, we check the individual key press.
-                switch(key_pressed){
-                    case('D'):
-                        state = 0; // Enter locked mode
-                        tx_buffer[0] = 8;
-                        tx_buffer[2] = 0;
-                        transition = 82768;
-                        led_index = 0;
-                        break;
-                    case('A'):
-                        transition -= 8192; // Decrease transition by 8192
-                        tx_buffer[1]--;
-                        led_index = 1;
-                        break;
-                    case('B'):
-                        transition += 8192; // Increase 8192
-                        tx_buffer[1]++;
-                        led_index = 2;
-                        break;
-                    case('0'):      // Pattern 0
-                        state = 3;
-                        tx_buffer[0] = 0;
-                        led_index = 3;
-                        break;
-                    case('1'):      // Pattern 1
-                        state = 4;
-                        tx_buffer[0] = 1;
-                        led_index = 4;
-                        break;
-                    case('2'):      // Pattern 2
-                        state = 5;
-                        tx_buffer[0] = 2;
-                        led_index = 5;
-                        break;
-                    case('3'):      // Pattern 3
-                        state = 6;
-                        tx_buffer[0] = 3;
-                        led_index = 6;
-                        break;
-                    case('4'):      // Pattern 4
-                        state = 7;
-                        tx_buffer[0] = 4;
-                        led_index = 7;
-                        break;
-                    case('5'):      // Pattern 5
-                        state = 8;
-                        tx_buffer[0] = 5;
-                        led_index = 8;
-                        break;
-                    case('6'):      // Pattern 6
-                        state = 9;
-                        tx_buffer[0] = 6;
-                        led_index = 9;
-                        break;
-                    case('7'):      // Pattern 7
-                        state = 10;
-                        tx_buffer[0] = 7;
-                        led_index = 10;
-                        break;
-                    default:
-                        break;
-                }
-                break;
-        }
-
-        while(P3IN > 15){} // Wait until button is released
-        send_I2C_data();
-    send_led_i2c();
-    }
-
-    if(P3IN < 16){ // Checks if pins 7 - 4 are on, that means a button is being held down; don't shift columns
-        if (++column >= 4) {column = 0;} // Add one to column, if it's 4 reset back to 0.
-    }
-    TB0CCTL0 &= ~TBIFG;
-}
-//---------------- End ISR_TB0_SwitchColumn ----------------
-
-//---------------- START ISR_TB1_Heartbeat ----------------
-// Heartbeat function
-#pragma vector = TIMER1_B0_VECTOR
-__interrupt void ISR_TB1_Heartbeat(void)
-{
-    P1OUT ^= BIT0;               //Toggle P1.0(LED1)
-    P6OUT ^= BIT6;               //Toggle P6.6(LED2)
-    TB1CCTL0 &= ~CCIFG;          //clear CCR0 flag
-}
-//---------------- END ISR_TB1_Heartbeat ----------------
-
-//---------------- START ISR_TB2_CCR0 ----------------
-// Sample LM19 Temperature
-#pragma vector = TIMER2_B0_VECTOR
-__interrupt void ISR_TB2_CCR0(void)
-{
-
-    start_ADC_conversion();
-
-}
-
-#pragma vector = USCI_B0_VECTOR
+#pragma vector=USCI_B0_VECTOR
 __interrupt void USCI_B0_ISR(void) {
-    if (UCB0IV == 0x18) { // TXIFG0 triggered
-            if (tx_index < TX_BYTES) {
-                UCB0TXBUF = tx_buffer[tx_index++]; // Load next byte
-            } else {
-                UCB0CTLW0 |= UCTXSTP; // Send stop condition
-                UCB0IE &= ~UCTXIE0;   // Disable TX interrupt after completion
-                tx_index = 0;
-            }
+    //ISR For receiving I2C transmissions
+    /* The microcontroller expects four bytes to be transmitted from the master.
+     * [state], [pattern], [temperature_int], [temperature_dec], [window_size]
+     * These bytes are sequentially added to the pattern_index, period_index, and key values.
+     *
+     * These values are then processed by lcd_write(), where more information can be found about their handling.
+     */
+    static int byte_count = 0;
+    if(UCB0IV == 0x16){  // RXIFG0 Flag, RX buffer is full and can be processed
+        switch(byte_count){
+            case 0:
+                state_index = UCB0RXBUF;
+                break;
+            case 1:
+                pattern_index = UCB0RXBUF;
+                break;
+            case 2:
+                temperature_int = UCB0RXBUF;
+                break;
+            case 3:
+                temperature_dec = UCB0RXBUF;
+                break;
+            case 4:
+                window_size = UCB0RXBUF;
+                break;
+            default:
+                break;
         }
-}
-
-#pragma vector = USCI_B1_VECTOR
-__interrupt void USCI_B1_ISR(void) {
-    if (UCB1IV == 0x18) { // TXIFG0 triggered
-
-                UCB1TXBUF = led_buffer[led_index];
-                UCB1CTLW0 |= UCTXSTP; // Send stop condition
-                UCB1IE &= ~UCTXIE1;   // Disable TX interrupt after completion
-
-       }
-}
-
-#pragma vector = ADC_VECTOR
-__interrupt void ADC_ISR(void) {
-    // Store the ADC result in the array
-    adc_results[sample_index] = ADCMEM0;
-    sample_index++;
-
-    // If we have collected window_size, calculate the average and reset the counter
-    if (sample_index >= window_size)
-    {
-
-        samples_collected = 1;
-        sample_index = 0;
-
-    }
-
-    if (samples_collected == 1)
-    {
-
-        unsigned int temperature = get_temperature();
-
+        byte_count++;
+        if(byte_count >= 5){
+            byte_count = 0;
+            lcd_write();
+        }
     }
 }
